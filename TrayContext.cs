@@ -14,6 +14,8 @@ internal sealed class TrayContext : ApplicationContext
     private const int PollIntervalMs = 250;
     // 一瞬途切れただけで赤枠が消えないよう、約 3 秒連続で配信の兆候がなければ下げる。
     private const int OffAfterIdleTicks = 3000 / PollIntervalMs;
+    // 枠を最前面に戻し直す間隔（約 2 秒）。
+    private const int TopMostReassertTicks = 2000 / PollIntervalMs;
 
     private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string RunValueName = "DiscordStreamingIndicator";
@@ -25,11 +27,13 @@ internal sealed class TrayContext : ApplicationContext
     private readonly NotifyIcon _trayIcon;
     private readonly ToolStripMenuItem _startupItem;
     private readonly ToolStripMenuItem _showInCallItem;
+    private readonly ContextMenuStrip _menu;
     private readonly List<BorderOverlay> _overlays = new();
 
     private OverlayStyle? _currentStyle;
     private int _idleTicks;
     private bool _polling;
+    private int _ticksSinceTopMost;
 
     public TrayContext()
     {
@@ -42,17 +46,17 @@ internal sealed class TrayContext : ApplicationContext
             Checked = IsShowInCallEnabled(),
         };
 
-        var menu = new ContextMenuStrip();
-        menu.Items.Add(_showInCallItem);
-        menu.Items.Add(_startupItem);
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("終了", null, (_, _) => ExitThread());
+        _menu = new ContextMenuStrip();
+        _menu.Items.Add(_showInCallItem);
+        _menu.Items.Add(_startupItem);
+        _menu.Items.Add(new ToolStripSeparator());
+        _menu.Items.Add("終了", null, (_, _) => ExitThread());
 
         _trayIcon = new NotifyIcon
         {
             Icon = TrayIcons.Idle,
             Text = "Discord 配信インジケーター: 待機中",
-            ContextMenuStrip = menu,
+            ContextMenuStrip = _menu,
             Visible = true,
         };
 
@@ -83,7 +87,7 @@ internal sealed class TrayContext : ApplicationContext
         catch (Exception ex)
         {
             // 判定できないときに「配信していない」と扱うと見逃しになるため、警告を出す。
-            _trayIcon.Text = Truncate("Discord 配信インジケーター: 検出エラー " + ex.Message);
+            SetTrayText("Discord 配信インジケーター: 検出エラー " + ex.Message);
             if (_currentStyle != OverlayStyle.Streaming)
             {
                 ApplyStyle(OverlayStyle.DetectionError);
@@ -116,12 +120,27 @@ internal sealed class TrayContext : ApplicationContext
             ApplyStyle(null);
         }
 
-        _trayIcon.Text = Truncate($"Discord 配信インジケーター: {DescribeState()} (キャプチャ {(capturing ? "使用中" : "なし")} / エンコード {encode:N1}%)");
+        SetTrayText($"Discord 配信インジケーター: {DescribeState()} (キャプチャ {(capturing ? "使用中" : "なし")} / エンコード {(encode > EncodeThresholdPercent ? "あり" : "なし")})");
 
         // 全画面アプリなどに前面を奪われても枠を最前面に戻す。
-        foreach (var overlay in _overlays)
+        // 毎回やるとトレイのメニューより前に出て閉じてしまうため、間隔を空け、メニュー表示中は行わない。
+        if (++_ticksSinceTopMost >= TopMostReassertTicks && !_menu.Visible)
         {
-            overlay.TopMost = true;
+            _ticksSinceTopMost = 0;
+            foreach (var overlay in _overlays)
+            {
+                overlay.TopMost = true;
+            }
+        }
+    }
+
+    private void SetTrayText(string text)
+    {
+        // NotifyIcon の更新はトレイのメニューやオーバーフロー領域を閉じてしまうため、変化したときだけ行う。
+        text = Truncate(text);
+        if (_trayIcon.Text != text)
+        {
+            _trayIcon.Text = text;
         }
     }
 
