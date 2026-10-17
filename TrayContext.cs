@@ -23,6 +23,8 @@ internal sealed class TrayContext : ApplicationContext
     private const string SettingsKeyPath = @"Software\StreamingIndicatorForDiscord";
     private const string ShowInCallValueName = "ShowInCallBorder";
     private const string ShowLabelValueName = "ShowLabel";
+    // 点滅の周期 (ms)。0 は点滅しない。
+    private const string BlinkPeriodValueName = "BlinkPeriodMs";
     private const string LanguageValueName = "Language";
 
     private readonly EncoderMonitor _monitor = new();
@@ -31,6 +33,11 @@ internal sealed class TrayContext : ApplicationContext
     private readonly ToolStripMenuItem _startupItem;
     private readonly ToolStripMenuItem _showInCallItem;
     private readonly ToolStripMenuItem _showLabelItem;
+    private readonly ToolStripMenuItem _blinkItem;
+    private readonly ToolStripMenuItem _blinkOffItem;
+    private readonly ToolStripMenuItem _blinkSlowItem;
+    private readonly ToolStripMenuItem _blinkNormalItem;
+    private readonly ToolStripMenuItem _blinkFastItem;
     private readonly ToolStripMenuItem _languageItem;
     private readonly ToolStripMenuItem _languageAutoItem;
     private readonly ToolStripMenuItem _languageJapaneseItem;
@@ -63,6 +70,13 @@ internal sealed class TrayContext : ApplicationContext
         {
             Checked = IsSettingEnabled(ShowLabelValueName),
         };
+        _blinkOffItem = new ToolStripMenuItem("", null, (_, _) => SetBlinkPeriod(0)) { Tag = 0 };
+        _blinkSlowItem = new ToolStripMenuItem("", null, (_, _) => SetBlinkPeriod(2000)) { Tag = 2000 };
+        _blinkNormalItem = new ToolStripMenuItem("", null, (_, _) => SetBlinkPeriod(1000)) { Tag = 1000 };
+        _blinkFastItem = new ToolStripMenuItem("", null, (_, _) => SetBlinkPeriod(500)) { Tag = 500 };
+        _blinkItem = new ToolStripMenuItem("");
+        _blinkItem.DropDownItems.AddRange([_blinkOffItem, _blinkSlowItem, _blinkNormalItem, _blinkFastItem]);
+        UpdateBlinkChecks(LoadBlinkPeriod());
 
         // 言語名はどの言語設定でも読めるよう、それぞれの言語で表記する。
         _languageAutoItem = new ToolStripMenuItem("", null, (_, _) => SetLanguage(Strings.Auto));
@@ -76,6 +90,7 @@ internal sealed class TrayContext : ApplicationContext
         _menu = new ContextMenuStrip();
         _menu.Items.Add(_showInCallItem);
         _menu.Items.Add(_showLabelItem);
+        _menu.Items.Add(_blinkItem);
         _menu.Items.Add(_startupItem);
         _menu.Items.Add(_languageItem);
         _menu.Items.Add(new ToolStripSeparator());
@@ -212,12 +227,13 @@ internal sealed class TrayContext : ApplicationContext
         {
             return;
         }
+        var blink = _currentStyle == OverlayStyle.Streaming && Blink.PeriodMs > 0;
         foreach (var screen in Screen.AllScreens)
         {
-            _overlays.Add(new BorderOverlay(screen, _currentStyle));
+            _overlays.Add(new BorderOverlay(screen, _currentStyle, blink));
             if (_showLabelItem.Checked)
             {
-                _overlays.Add(new LabelOverlay(screen, _currentStyle, _strings.LabelFor(_currentStyle)));
+                _overlays.Add(new LabelOverlay(screen, _currentStyle, _strings.LabelFor(_currentStyle), blink));
             }
         }
         foreach (var overlay in _overlays)
@@ -252,6 +268,11 @@ internal sealed class TrayContext : ApplicationContext
         var language = LoadLanguage();
         _showInCallItem.Text = _strings.MenuShowInCall;
         _showLabelItem.Text = _strings.MenuShowLabel;
+        _blinkItem.Text = _strings.MenuBlink;
+        _blinkOffItem.Text = _strings.MenuBlinkOff;
+        _blinkSlowItem.Text = _strings.MenuBlinkSlow;
+        _blinkNormalItem.Text = _strings.MenuBlinkNormal;
+        _blinkFastItem.Text = _strings.MenuBlinkFast;
         _startupItem.Text = _strings.MenuStartup;
         _languageItem.Text = _strings.MenuLanguage;
         _languageAutoItem.Text = _strings.MenuLanguageAuto;
@@ -286,6 +307,32 @@ internal sealed class TrayContext : ApplicationContext
     {
         using var key = Registry.CurrentUser.OpenSubKey(SettingsKeyPath);
         return key?.GetValue(valueName) is not int value || value != 0;
+    }
+
+    // 点滅は好みが分かれるため既定でオフ。
+    private static int LoadBlinkPeriod()
+    {
+        using var key = Registry.CurrentUser.OpenSubKey(SettingsKeyPath);
+        return key?.GetValue(BlinkPeriodValueName) is int value && value > 0 ? value : 0;
+    }
+
+    private void SetBlinkPeriod(int periodMs)
+    {
+        using (var key = Registry.CurrentUser.CreateSubKey(SettingsKeyPath))
+        {
+            key.SetValue(BlinkPeriodValueName, periodMs, RegistryValueKind.DWord);
+        }
+        UpdateBlinkChecks(periodMs);
+        RebuildOverlays();
+    }
+
+    private void UpdateBlinkChecks(int periodMs)
+    {
+        Blink.PeriodMs = periodMs;
+        foreach (ToolStripMenuItem item in _blinkItem.DropDownItems)
+        {
+            item.Checked = (int)item.Tag! == periodMs;
+        }
     }
 
     private static void ToggleSetting(ToolStripMenuItem item, string valueName)

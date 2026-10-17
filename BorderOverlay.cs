@@ -15,6 +15,48 @@ internal sealed class OverlayStyle(Color color, int thickness, Color labelTextCo
     public Color LabelTextColor { get; } = labelTextColor;
 }
 
+// 点滅の点灯・消灯。ウィンドウごとにタイマーを持つと切り替えの時刻がずれるため、
+// 1 つのタイマーで全モニターの枠とラベルを同時に切り替える。
+internal static class Blink
+{
+    // 周期のうち点灯している割合 (%)。
+    private const int OnPercent = 60;
+
+    private static readonly System.Windows.Forms.Timer Timer = new() { Interval = 20 };
+    private static event Action? ChangedCore;
+
+    static Blink() => Timer.Tick += (_, _) =>
+    {
+        var off = Environment.TickCount64 % PeriodMs >= PeriodMs * OnPercent / 100;
+        if (off != IsOff)
+        {
+            IsOff = off;
+            ChangedCore?.Invoke();
+        }
+    };
+
+    public static int PeriodMs { get; set; } = 1000;
+
+    public static bool IsOff { get; private set; }
+
+    public static event Action Changed
+    {
+        add
+        {
+            ChangedCore += value;
+            Timer.Start();
+        }
+        remove
+        {
+            ChangedCore -= value;
+            if (ChangedCore is null)
+            {
+                Timer.Stop();
+            }
+        }
+    }
+}
+
 /// <summary>
 /// クリック透過・非アクティブ・最前面で、配信の映像には映らないウィンドウの共通部分。
 /// </summary>
@@ -67,17 +109,32 @@ internal sealed class BorderOverlay : OverlayWindow
     private static readonly Color TransparentColor = Color.FromArgb(1, 2, 3);
 
     private readonly OverlayStyle _style;
+    private readonly bool _blink;
 
-    public BorderOverlay(Screen screen, OverlayStyle style)
+    public BorderOverlay(Screen screen, OverlayStyle style, bool blink)
     {
         _style = style;
+        _blink = blink;
         BackColor = TransparentColor;
         TransparencyKey = TransparentColor;
         Bounds = screen.Bounds;
+
+        if (blink)
+        {
+            Blink.Changed += OnBlinkChanged;
+        }
     }
+
+    // 再描画を後回しにせず、その場で描き直す。
+    private void OnBlinkChanged() => Refresh();
 
     protected override void OnPaint(PaintEventArgs e)
     {
+        // 消灯中は何も描かない（背景は透過色なので枠が消える）。
+        if (_blink && Blink.IsOff)
+        {
+            return;
+        }
         var g = e.Graphics;
         var w = ClientSize.Width;
         var h = ClientSize.Height;
@@ -88,6 +145,15 @@ internal sealed class BorderOverlay : OverlayWindow
         g.FillRectangle(brush, 0, h - t, w, t);
         g.FillRectangle(brush, 0, 0, t, h);
         g.FillRectangle(brush, w - t, 0, t, h);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing && _blink)
+        {
+            Blink.Changed -= OnBlinkChanged;
+        }
+        base.Dispose(disposing);
     }
 }
 
@@ -108,20 +174,23 @@ internal sealed class LabelOverlay : OverlayWindow
     private readonly OverlayStyle _style;
     private readonly string _label;
     private readonly Screen _screen;
+    private readonly bool _blink;
     private readonly System.Windows.Forms.Timer _fadeTimer = new() { Interval = IdleIntervalMs };
     private Font? _font;
     private int _alpha = 255;
+    private int _appliedAlpha = -1;
 
     // WinForms の Opacity は内部でレイヤードスタイルを付け外しするため使わず、直接設定する。
     // レイヤードウィンドウは透明度を一度も設定しないと表示されないので、作成時に必ず設定する。
     [DllImport("user32.dll")]
     private static extern bool SetLayeredWindowAttributes(IntPtr hwnd, uint crKey, byte bAlpha, uint dwFlags);
 
-    public LabelOverlay(Screen screen, OverlayStyle style, string label)
+    public LabelOverlay(Screen screen, OverlayStyle style, string label, bool blink)
     {
         _style = style;
         _label = label;
         _screen = screen;
+        _blink = blink;
         BackColor = style.Color;
         // ハンドル作成時にモニターの DPI で大きさを決めるため、まずは対象モニター上に置いておく。
         Bounds = new Rectangle(screen.Bounds.X + screen.Bounds.Width / 2, screen.Bounds.Y, 1, 1);
@@ -139,8 +208,12 @@ internal sealed class LabelOverlay : OverlayWindow
         var height = textSize.Height + (int)(8 * scale);
         Bounds = new Rectangle(_screen.Bounds.X + (_screen.Bounds.Width - width) / 2, _screen.Bounds.Y, width, height);
 
-        SetLayeredWindowAttributes(Handle, 0, (byte)_alpha, LWA_ALPHA);
+        ApplyAlpha();
         _fadeTimer.Start();
+        if (_blink)
+        {
+            Blink.Changed += ApplyAlpha;
+        }
     }
 
     private void UpdateFade()
@@ -150,9 +223,20 @@ internal sealed class LabelOverlay : OverlayWindow
         if (_alpha != target)
         {
             _alpha = target > _alpha ? Math.Min(target, _alpha + FadeStep) : Math.Max(target, _alpha - FadeStep);
-            SetLayeredWindowAttributes(Handle, 0, (byte)_alpha, LWA_ALPHA);
         }
+        ApplyAlpha();
         _fadeTimer.Interval = _alpha == target ? IdleIntervalMs : FadingIntervalMs;
+    }
+
+    // カーソルによるフェードに、点滅の消灯を重ねる。変化したときだけ設定する。
+    private void ApplyAlpha()
+    {
+        var alpha = _blink && Blink.IsOff ? 0 : _alpha;
+        if (alpha != _appliedAlpha)
+        {
+            _appliedAlpha = alpha;
+            SetLayeredWindowAttributes(Handle, 0, (byte)alpha, LWA_ALPHA);
+        }
     }
 
     protected override void OnPaint(PaintEventArgs e)
@@ -169,6 +253,10 @@ internal sealed class LabelOverlay : OverlayWindow
     {
         if (disposing)
         {
+            if (_blink)
+            {
+                Blink.Changed -= ApplyAlpha;
+            }
             _fadeTimer.Dispose();
             _font?.Dispose();
         }
