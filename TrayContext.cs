@@ -50,7 +50,7 @@ internal sealed class TrayContext : ApplicationContext
 
         _trayIcon = new NotifyIcon
         {
-            Icon = SystemIcons.Shield,
+            Icon = TrayIcons.Idle,
             Text = "Discord 配信インジケーター: 待機中",
             ContextMenuStrip = menu,
             Visible = true,
@@ -139,9 +139,9 @@ internal sealed class TrayContext : ApplicationContext
             return;
         }
         _currentStyle = style;
-        _trayIcon.Icon = style == OverlayStyle.Streaming ? SystemIcons.Error
-            : style is null ? SystemIcons.Shield
-            : SystemIcons.Warning;
+        _trayIcon.Icon = style == OverlayStyle.Streaming ? TrayIcons.Streaming
+            : style is null ? TrayIcons.Idle
+            : TrayIcons.InCall;
         RebuildOverlays();
     }
 
