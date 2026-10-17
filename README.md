@@ -56,6 +56,12 @@ dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile
 
 `publish\StreamingIndicatorForDiscord.exe` が出力される。
 
+## ソースコード
+
+https://github.com/tallcat4/streaming-indicator-for-discord
+
+配布しているバイナリに対応するソースコードは、同じバージョン名のタグ（例: `v1.0.0`）から取得できる。
+
 ## ライセンス
 
 [GNU General Public License v3.0](LICENSE)
