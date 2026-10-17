@@ -21,14 +21,16 @@ internal sealed class TrayContext : ApplicationContext
     private const string RunValueName = "DiscordStreamingIndicator";
     private const string SettingsKeyPath = @"Software\DiscordStreamingIndicator";
     private const string ShowInCallValueName = "ShowInCallBorder";
+    private const string ShowLabelValueName = "ShowLabel";
 
     private readonly EncoderMonitor _monitor = new();
     private readonly System.Windows.Forms.Timer _timer = new() { Interval = PollIntervalMs };
     private readonly NotifyIcon _trayIcon;
     private readonly ToolStripMenuItem _startupItem;
     private readonly ToolStripMenuItem _showInCallItem;
+    private readonly ToolStripMenuItem _showLabelItem;
     private readonly ContextMenuStrip _menu;
-    private readonly List<BorderOverlay> _overlays = new();
+    private readonly List<OverlayWindow> _overlays = new();
 
     private OverlayStyle? _currentStyle;
     private int _idleTicks;
@@ -41,13 +43,22 @@ internal sealed class TrayContext : ApplicationContext
         {
             Checked = IsStartupEnabled(),
         };
-        _showInCallItem = new ToolStripMenuItem("通話中も黄色枠を表示", null, (_, _) => ToggleShowInCall())
+        _showInCallItem = new ToolStripMenuItem("通話中も黄色枠を表示", null, (sender, _) => ToggleSetting((ToolStripMenuItem)sender!, ShowInCallValueName))
         {
-            Checked = IsShowInCallEnabled(),
+            Checked = IsSettingEnabled(ShowInCallValueName),
+        };
+        _showLabelItem = new ToolStripMenuItem("枠にラベル文字を表示", null, (sender, _) =>
+        {
+            ToggleSetting((ToolStripMenuItem)sender!, ShowLabelValueName);
+            RebuildOverlays();
+        })
+        {
+            Checked = IsSettingEnabled(ShowLabelValueName),
         };
 
         _menu = new ContextMenuStrip();
         _menu.Items.Add(_showInCallItem);
+        _menu.Items.Add(_showLabelItem);
         _menu.Items.Add(_startupItem);
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add("終了", null, (_, _) => ExitThread());
@@ -179,9 +190,15 @@ internal sealed class TrayContext : ApplicationContext
         }
         foreach (var screen in Screen.AllScreens)
         {
-            var overlay = new BorderOverlay(screen, _currentStyle);
+            _overlays.Add(new BorderOverlay(screen, _currentStyle));
+            if (_showLabelItem.Checked)
+            {
+                _overlays.Add(new LabelOverlay(screen, _currentStyle));
+            }
+        }
+        foreach (var overlay in _overlays)
+        {
             overlay.Show();
-            _overlays.Add(overlay);
         }
     }
 
@@ -209,20 +226,21 @@ internal sealed class TrayContext : ApplicationContext
         _startupItem.Checked = IsStartupEnabled();
     }
 
-    private static bool IsShowInCallEnabled()
+    // 設定は既定でオン。明示的に 0 が保存されているときだけオフ。
+    private static bool IsSettingEnabled(string valueName)
     {
         using var key = Registry.CurrentUser.OpenSubKey(SettingsKeyPath);
-        return key?.GetValue(ShowInCallValueName) is not int value || value != 0;
+        return key?.GetValue(valueName) is not int value || value != 0;
     }
 
-    private void ToggleShowInCall()
+    private static void ToggleSetting(ToolStripMenuItem item, string valueName)
     {
-        var enabled = !_showInCallItem.Checked;
+        var enabled = !item.Checked;
         using (var key = Registry.CurrentUser.CreateSubKey(SettingsKeyPath))
         {
-            key.SetValue(ShowInCallValueName, enabled ? 1 : 0, RegistryValueKind.DWord);
+            key.SetValue(valueName, enabled ? 1 : 0, RegistryValueKind.DWord);
         }
-        _showInCallItem.Checked = enabled;
+        item.Checked = enabled;
     }
 
     protected override void ExitThreadCore()
