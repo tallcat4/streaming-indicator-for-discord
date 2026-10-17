@@ -10,6 +10,10 @@
     <AssemblyName>StreamingIndicatorForDiscord</AssemblyName>
     <RootNamespace>StreamingIndicatorForDiscord</RootNamespace>
     <ApplicationIcon>app.ico</ApplicationIcon>
+    <!-- リリース時は CI がタグから -p:Version=x.y.z で上書きする。 -->
+    <Version>0.0.0</Version>
+    <Product>Streaming Indicator for Discord</Product>
+    <Copyright>GPL-3.0</Copyright>
   </PropertyGroup>
 
 </Project>

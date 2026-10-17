@@ -1,0 +1,63 @@
+# v1.2.3 のようなタグを push すると、アプリとインストーラーをビルドして GitHub Release に添付する。
+# 手動実行（workflow_dispatch）ではリリースを作らず、ビルド結果を Artifact として残すだけ。
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Determine version
+        id: version
+        shell: pwsh
+        run: |
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $version = "${{ github.ref_name }}".TrimStart("v")
+          } else {
+            $version = "0.0.0"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Publish app
+        run: dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -p:Version=${{ steps.version.outputs.version }} -o publish
+
+      - name: Install NSIS
+        run: choco install nsis -y --no-progress
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $version = "${{ steps.version.outputs.version }}"
+          & "${env:ProgramFiles(x86)}\NSIS\makensis.exe" /V2 "/DVERSION=$version" "/DPUBLISH_DIR=..\publish" "/DOUT_FILE=..\dist\StreamingIndicatorForDiscord-$version-setup.exe" installer\installer.nsi
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Create portable zip
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          Compress-Archive -Path publish\StreamingIndicatorForDiscord.exe, LICENSE, README.md -DestinationPath "dist\StreamingIndicatorForDiscord-$version-portable.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+
+      - name: Create GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" dist/* --title "${{ github.ref_name }}" --generate-notes
