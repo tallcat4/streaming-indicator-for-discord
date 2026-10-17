@@ -1,17 +1,18 @@
 using System.Runtime.InteropServices;
 
-namespace DiscordStreamingIndicator;
+namespace StreamingIndicatorForDiscord;
 
-internal sealed record OverlayStyle(Color Color, int Thickness, string Label, Color LabelTextColor)
+// 状態ごとの見た目。ラベルの文言は Strings.LabelFor で言語に応じて決める。
+// 同じ見た目でも状態を区別できるよう、値ではなく参照で比較する class にしている。
+internal sealed class OverlayStyle(Color color, int thickness, Color labelTextColor)
 {
-    public static readonly OverlayStyle Streaming =
-        new(Color.FromArgb(230, 20, 20), 6, "● Discord 配信中", Color.White);
+    public static readonly OverlayStyle Streaming = new(Color.FromArgb(230, 20, 20), 6, Color.White);
+    public static readonly OverlayStyle InCall = new(Color.FromArgb(255, 190, 0), 3, Color.Black);
+    public static readonly OverlayStyle DetectionError = new(Color.FromArgb(255, 190, 0), 3, Color.Black);
 
-    public static readonly OverlayStyle InCall =
-        new(Color.FromArgb(255, 190, 0), 3, "Discord 通話中 — 画面共有していないか確認", Color.Black);
-
-    public static readonly OverlayStyle DetectionError =
-        new(Color.FromArgb(255, 190, 0), 3, "Discord の配信状態を検出できません", Color.Black);
+    public Color Color { get; } = color;
+    public int Thickness { get; } = thickness;
+    public Color LabelTextColor { get; } = labelTextColor;
 }
 
 /// <summary>
@@ -105,6 +106,7 @@ internal sealed class LabelOverlay : OverlayWindow
     private const uint LWA_ALPHA = 0x00000002;
 
     private readonly OverlayStyle _style;
+    private readonly string _label;
     private readonly Screen _screen;
     private readonly System.Windows.Forms.Timer _fadeTimer = new() { Interval = IdleIntervalMs };
     private Font? _font;
@@ -115,9 +117,10 @@ internal sealed class LabelOverlay : OverlayWindow
     [DllImport("user32.dll")]
     private static extern bool SetLayeredWindowAttributes(IntPtr hwnd, uint crKey, byte bAlpha, uint dwFlags);
 
-    public LabelOverlay(Screen screen, OverlayStyle style)
+    public LabelOverlay(Screen screen, OverlayStyle style, string label)
     {
         _style = style;
+        _label = label;
         _screen = screen;
         BackColor = style.Color;
         // ハンドル作成時にモニターの DPI で大きさを決めるため、まずは対象モニター上に置いておく。
@@ -131,7 +134,7 @@ internal sealed class LabelOverlay : OverlayWindow
 
         var scale = DeviceDpi / 96f;
         _font = new Font("Yu Gothic UI", 15f * scale, FontStyle.Bold, GraphicsUnit.Pixel);
-        var textSize = TextRenderer.MeasureText(_style.Label, _font);
+        var textSize = TextRenderer.MeasureText(_label, _font);
         var width = textSize.Width + (int)(24 * scale);
         var height = textSize.Height + (int)(8 * scale);
         Bounds = new Rectangle(_screen.Bounds.X + (_screen.Bounds.Width - width) / 2, _screen.Bounds.Y, width, height);
@@ -158,7 +161,7 @@ internal sealed class LabelOverlay : OverlayWindow
         {
             return;
         }
-        TextRenderer.DrawText(e.Graphics, _style.Label, _font, ClientRectangle, _style.LabelTextColor,
+        TextRenderer.DrawText(e.Graphics, _label, _font, ClientRectangle, _style.LabelTextColor,
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
     }
 

@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using System.Text.RegularExpressions;
 
-namespace DiscordStreamingIndicator;
+namespace StreamingIndicatorForDiscord;
 
 /// <summary>
 /// Discord プロセスが GPU の動画エンコードエンジンを使っているかを

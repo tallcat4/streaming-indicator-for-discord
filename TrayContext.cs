@@ -1,6 +1,6 @@
 using Microsoft.Win32;
 
-namespace DiscordStreamingIndicator;
+namespace StreamingIndicatorForDiscord;
 
 /// <summary>
 /// タスクトレイに常駐し、Discord の状態に応じて全モニターの枠を出し入れする。
@@ -17,11 +17,13 @@ internal sealed class TrayContext : ApplicationContext
     // 枠を最前面に戻し直す間隔（約 2 秒）。
     private const int TopMostReassertTicks = 2000 / PollIntervalMs;
 
+    private const string AppName = "Streaming Indicator for Discord";
     private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
-    private const string RunValueName = "DiscordStreamingIndicator";
-    private const string SettingsKeyPath = @"Software\DiscordStreamingIndicator";
+    private const string RunValueName = "StreamingIndicatorForDiscord";
+    private const string SettingsKeyPath = @"Software\StreamingIndicatorForDiscord";
     private const string ShowInCallValueName = "ShowInCallBorder";
     private const string ShowLabelValueName = "ShowLabel";
+    private const string LanguageValueName = "Language";
 
     private readonly EncoderMonitor _monitor = new();
     private readonly System.Windows.Forms.Timer _timer = new() { Interval = PollIntervalMs };
@@ -29,9 +31,15 @@ internal sealed class TrayContext : ApplicationContext
     private readonly ToolStripMenuItem _startupItem;
     private readonly ToolStripMenuItem _showInCallItem;
     private readonly ToolStripMenuItem _showLabelItem;
+    private readonly ToolStripMenuItem _languageItem;
+    private readonly ToolStripMenuItem _languageAutoItem;
+    private readonly ToolStripMenuItem _languageJapaneseItem;
+    private readonly ToolStripMenuItem _languageEnglishItem;
+    private readonly ToolStripMenuItem _exitItem;
     private readonly ContextMenuStrip _menu;
     private readonly List<OverlayWindow> _overlays = new();
 
+    private Strings _strings;
     private OverlayStyle? _currentStyle;
     private int _idleTicks;
     private bool _polling;
@@ -39,15 +47,15 @@ internal sealed class TrayContext : ApplicationContext
 
     public TrayContext()
     {
-        _startupItem = new ToolStripMenuItem("Windows 起動時に実行", null, (_, _) => ToggleStartup())
+        _startupItem = new ToolStripMenuItem("", null, (_, _) => ToggleStartup())
         {
             Checked = IsStartupEnabled(),
         };
-        _showInCallItem = new ToolStripMenuItem("通話中も黄色枠を表示", null, (sender, _) => ToggleSetting((ToolStripMenuItem)sender!, ShowInCallValueName))
+        _showInCallItem = new ToolStripMenuItem("", null, (sender, _) => ToggleSetting((ToolStripMenuItem)sender!, ShowInCallValueName))
         {
             Checked = IsSettingEnabled(ShowInCallValueName),
         };
-        _showLabelItem = new ToolStripMenuItem("枠にラベル文字を表示", null, (sender, _) =>
+        _showLabelItem = new ToolStripMenuItem("", null, (sender, _) =>
         {
             ToggleSetting((ToolStripMenuItem)sender!, ShowLabelValueName);
             RebuildOverlays();
@@ -56,20 +64,33 @@ internal sealed class TrayContext : ApplicationContext
             Checked = IsSettingEnabled(ShowLabelValueName),
         };
 
+        // 言語名はどの言語設定でも読めるよう、それぞれの言語で表記する。
+        _languageAutoItem = new ToolStripMenuItem("", null, (_, _) => SetLanguage(Strings.Auto));
+        _languageJapaneseItem = new ToolStripMenuItem("日本語", null, (_, _) => SetLanguage(Strings.JapaneseCode));
+        _languageEnglishItem = new ToolStripMenuItem("English", null, (_, _) => SetLanguage(Strings.EnglishCode));
+        _languageItem = new ToolStripMenuItem("");
+        _languageItem.DropDownItems.AddRange([_languageAutoItem, _languageJapaneseItem, _languageEnglishItem]);
+
+        _exitItem = new ToolStripMenuItem("", null, (_, _) => ExitThread());
+
         _menu = new ContextMenuStrip();
         _menu.Items.Add(_showInCallItem);
         _menu.Items.Add(_showLabelItem);
         _menu.Items.Add(_startupItem);
+        _menu.Items.Add(_languageItem);
         _menu.Items.Add(new ToolStripSeparator());
-        _menu.Items.Add("終了", null, (_, _) => ExitThread());
+        _menu.Items.Add(_exitItem);
 
         _trayIcon = new NotifyIcon
         {
             Icon = TrayIcons.Idle,
-            Text = "Discord 配信インジケーター: 待機中",
+            Text = AppName,
             ContextMenuStrip = _menu,
             Visible = true,
         };
+
+        _strings = Strings.For(LoadLanguage());
+        ApplyLanguage();
 
         SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
         _timer.Tick += (_, _) => Poll();
@@ -98,7 +119,7 @@ internal sealed class TrayContext : ApplicationContext
         catch (Exception ex)
         {
             // 判定できないときに「配信していない」と扱うと見逃しになるため、警告を出す。
-            SetTrayText("Discord 配信インジケーター: 検出エラー " + ex.Message);
+            SetTrayText($"{AppName}: {_strings.StateError} {ex.Message}");
             if (_currentStyle != OverlayStyle.Streaming)
             {
                 ApplyStyle(OverlayStyle.DetectionError);
@@ -113,7 +134,8 @@ internal sealed class TrayContext : ApplicationContext
         // 主判定は OS が記録する画面キャプチャの使用状況（Discord のクリップ機能がオフであることが前提。
         // オンだと常にキャプチャ中になり、赤枠が出っぱなしになる＝安全側に倒れる）。
         // GPU エンコードは、記録されない方式でキャプチャされた場合の保険。
-        if (capturing || encode > EncodeThresholdPercent)
+        var encoding = encode > EncodeThresholdPercent;
+        if (capturing || encoding)
         {
             _idleTicks = 0;
             ApplyStyle(OverlayStyle.Streaming);
@@ -131,7 +153,8 @@ internal sealed class TrayContext : ApplicationContext
             ApplyStyle(null);
         }
 
-        SetTrayText($"Discord 配信インジケーター: {DescribeState()} (キャプチャ {(capturing ? "使用中" : "なし")} / エンコード {(encode > EncodeThresholdPercent ? "あり" : "なし")})");
+        var s = _strings;
+        SetTrayText($"{AppName}: {DescribeState()} ({s.Capture}: {(capturing ? s.Detected : s.NotDetected)} / {s.Encode}: {(encoding ? s.Detected : s.NotDetected)})");
 
         // 全画面アプリなどに前面を奪われても枠を最前面に戻す。
         // 毎回やるとトレイのメニューより前に出て閉じてしまうため、間隔を空け、メニュー表示中は行わない。
@@ -157,9 +180,10 @@ internal sealed class TrayContext : ApplicationContext
 
     private string DescribeState()
     {
-        if (_currentStyle == OverlayStyle.Streaming) return "配信中";
-        if (_currentStyle == OverlayStyle.InCall) return "通話中";
-        return "待機中";
+        if (_currentStyle == OverlayStyle.Streaming) return _strings.StateStreaming;
+        if (_currentStyle == OverlayStyle.InCall) return _strings.StateInCall;
+        if (_currentStyle == OverlayStyle.DetectionError) return _strings.StateError;
+        return _strings.StateIdle;
     }
 
     private void ApplyStyle(OverlayStyle? style)
@@ -193,7 +217,7 @@ internal sealed class TrayContext : ApplicationContext
             _overlays.Add(new BorderOverlay(screen, _currentStyle));
             if (_showLabelItem.Checked)
             {
-                _overlays.Add(new LabelOverlay(screen, _currentStyle));
+                _overlays.Add(new LabelOverlay(screen, _currentStyle, _strings.LabelFor(_currentStyle)));
             }
         }
         foreach (var overlay in _overlays)
@@ -205,6 +229,37 @@ internal sealed class TrayContext : ApplicationContext
     private void OnDisplaySettingsChanged(object? sender, EventArgs e) => RebuildOverlays();
 
     private static string Truncate(string text) => text.Length <= 127 ? text : text[..127];
+
+    private static string LoadLanguage()
+    {
+        using var key = Registry.CurrentUser.OpenSubKey(SettingsKeyPath);
+        return key?.GetValue(LanguageValueName) as string ?? Strings.Auto;
+    }
+
+    private void SetLanguage(string language)
+    {
+        using (var key = Registry.CurrentUser.CreateSubKey(SettingsKeyPath))
+        {
+            key.SetValue(LanguageValueName, language);
+        }
+        _strings = Strings.For(language);
+        ApplyLanguage();
+        RebuildOverlays();
+    }
+
+    private void ApplyLanguage()
+    {
+        var language = LoadLanguage();
+        _showInCallItem.Text = _strings.MenuShowInCall;
+        _showLabelItem.Text = _strings.MenuShowLabel;
+        _startupItem.Text = _strings.MenuStartup;
+        _languageItem.Text = _strings.MenuLanguage;
+        _languageAutoItem.Text = _strings.MenuLanguageAuto;
+        _languageAutoItem.Checked = language != Strings.JapaneseCode && language != Strings.EnglishCode;
+        _languageJapaneseItem.Checked = language == Strings.JapaneseCode;
+        _languageEnglishItem.Checked = language == Strings.EnglishCode;
+        _exitItem.Text = _strings.MenuExit;
+    }
 
     private static bool IsStartupEnabled()
     {

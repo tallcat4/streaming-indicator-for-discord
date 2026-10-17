@@ -1,11 +1,11 @@
-namespace DiscordStreamingIndicator;
+namespace StreamingIndicatorForDiscord;
 
 internal static class Program
 {
     [STAThread]
     private static void Main()
     {
-        using var mutex = new Mutex(true, @"Local\DiscordStreamingIndicator", out var isFirstInstance);
+        using var mutex = new Mutex(true, @"Local\StreamingIndicatorForDiscord", out var isFirstInstance);
         if (!isFirstInstance)
         {
             return;

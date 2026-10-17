@@ -1,6 +1,6 @@
 using Microsoft.Win32;
 
-namespace DiscordStreamingIndicator;
+namespace StreamingIndicatorForDiscord;
 
 /// <summary>
 /// Windows のプライバシー機能が記録する CapabilityAccessManager のレジストリから、

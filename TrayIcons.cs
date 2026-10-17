@@ -1,7 +1,7 @@
 using System.Drawing.Drawing2D;
 using System.Runtime.InteropServices;
 
-namespace DiscordStreamingIndicator;
+namespace StreamingIndicatorForDiscord;
 
 /// <summary>
 /// 状態ごとのトレイアイコン（モニターの形）。app.ico も同じデザインで
