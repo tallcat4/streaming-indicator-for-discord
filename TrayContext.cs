@@ -25,6 +25,10 @@ internal sealed class TrayContext : ApplicationContext
     private const string ShowLabelValueName = "ShowLabel";
     // 点滅の周期 (ms)。0 は点滅しない。
     private const string BlinkPeriodValueName = "BlinkPeriodMs";
+    // 画面共有中に起動していたら強く警告するアプリ（拡張子なしの exe 名）。
+    private const string WatchedAppsValueName = "WatchedApps";
+    // 注意するアプリが起動しているときは、点滅の設定にかかわらずこの周期で点滅させる。
+    private const int WatchedAppBlinkPeriodMs = 500;
     private const string LanguageValueName = "Language";
 
     private readonly EncoderMonitor _monitor = new();
@@ -38,6 +42,7 @@ internal sealed class TrayContext : ApplicationContext
     private readonly ToolStripMenuItem _blinkSlowItem;
     private readonly ToolStripMenuItem _blinkNormalItem;
     private readonly ToolStripMenuItem _blinkFastItem;
+    private readonly ToolStripMenuItem _watchedAppsItem;
     private readonly ToolStripMenuItem _languageItem;
     private readonly ToolStripMenuItem _languageAutoItem;
     private readonly ToolStripMenuItem _languageJapaneseItem;
@@ -48,6 +53,10 @@ internal sealed class TrayContext : ApplicationContext
 
     private Strings _strings;
     private OverlayStyle? _currentStyle;
+    private int _blinkPeriodSetting;
+    private List<string> _watchedApps = LoadWatchedApps();
+    private IReadOnlyList<string> _runningWatchedApps = [];
+    private WatchedAppsForm? _watchedAppsForm;
     private int _idleTicks;
     private bool _polling;
     private int _ticksSinceTopMost;
@@ -77,6 +86,7 @@ internal sealed class TrayContext : ApplicationContext
         _blinkItem = new ToolStripMenuItem("");
         _blinkItem.DropDownItems.AddRange([_blinkOffItem, _blinkSlowItem, _blinkNormalItem, _blinkFastItem]);
         UpdateBlinkChecks(LoadBlinkPeriod());
+        _watchedAppsItem = new ToolStripMenuItem("", null, (_, _) => ShowWatchedApps());
 
         // 言語名はどの言語設定でも読めるよう、それぞれの言語で表記する。
         _languageAutoItem = new ToolStripMenuItem("", null, (_, _) => SetLanguage(Strings.Auto));
@@ -91,6 +101,7 @@ internal sealed class TrayContext : ApplicationContext
         _menu.Items.Add(_showInCallItem);
         _menu.Items.Add(_showLabelItem);
         _menu.Items.Add(_blinkItem);
+        _menu.Items.Add(_watchedAppsItem);
         _menu.Items.Add(_startupItem);
         _menu.Items.Add(_languageItem);
         _menu.Items.Add(new ToolStripSeparator());
@@ -135,7 +146,7 @@ internal sealed class TrayContext : ApplicationContext
         {
             // 判定できないときに「配信していない」と扱うと見逃しになるため、警告を出す。
             SetTrayText($"{AppName}: {_strings.StateError} {ex.Message}");
-            if (_currentStyle != OverlayStyle.Streaming)
+            if (!IsStreamingStyle)
             {
                 ApplyStyle(OverlayStyle.DetectionError);
             }
@@ -153,9 +164,13 @@ internal sealed class TrayContext : ApplicationContext
         if (capturing || encoding)
         {
             _idleTicks = 0;
-            ApplyStyle(OverlayStyle.Streaming);
+            var runningWatchedApps = _watchedApps.Select(WatchedAppsForm.ProcessNameOf)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Where(_monitor.RunningProcessNames.Contains)
+                .ToList();
+            ApplyStyle(runningWatchedApps.Count > 0 ? OverlayStyle.StreamingWithWatchedApp : OverlayStyle.Streaming, runningWatchedApps);
         }
-        else if (_currentStyle == OverlayStyle.Streaming && ++_idleTicks < OffAfterIdleTicks)
+        else if (IsStreamingStyle && ++_idleTicks < OffAfterIdleTicks)
         {
             // 赤枠を維持する。
         }
@@ -173,7 +188,7 @@ internal sealed class TrayContext : ApplicationContext
 
         // 全画面アプリなどに前面を奪われても枠を最前面に戻す。
         // 毎回やるとトレイのメニューより前に出て閉じてしまうため、間隔を空け、メニュー表示中は行わない。
-        if (++_ticksSinceTopMost >= TopMostReassertTicks && !_menu.Visible)
+        if (++_ticksSinceTopMost >= TopMostReassertTicks && !_menu.Visible && _watchedAppsForm?.IsMenuOpen != true)
         {
             _ticksSinceTopMost = 0;
             foreach (var overlay in _overlays)
@@ -193,22 +208,28 @@ internal sealed class TrayContext : ApplicationContext
         }
     }
 
+    private bool IsStreamingStyle =>
+        _currentStyle == OverlayStyle.Streaming || _currentStyle == OverlayStyle.StreamingWithWatchedApp;
+
     private string DescribeState()
     {
+        if (_currentStyle == OverlayStyle.StreamingWithWatchedApp) return _strings.StateStreamingWithWatchedApp;
         if (_currentStyle == OverlayStyle.Streaming) return _strings.StateStreaming;
         if (_currentStyle == OverlayStyle.InCall) return _strings.StateInCall;
         if (_currentStyle == OverlayStyle.DetectionError) return _strings.StateError;
         return _strings.StateIdle;
     }
 
-    private void ApplyStyle(OverlayStyle? style)
+    private void ApplyStyle(OverlayStyle? style, IReadOnlyList<string>? runningWatchedApps = null)
     {
-        if (_currentStyle == style)
+        runningWatchedApps ??= [];
+        if (_currentStyle == style && _runningWatchedApps.SequenceEqual(runningWatchedApps))
         {
             return;
         }
         _currentStyle = style;
-        _trayIcon.Icon = style == OverlayStyle.Streaming ? TrayIcons.Streaming
+        _runningWatchedApps = runningWatchedApps;
+        _trayIcon.Icon = IsStreamingStyle ? TrayIcons.Streaming
             : style is null ? TrayIcons.Idle
             : TrayIcons.InCall;
         RebuildOverlays();
@@ -227,13 +248,15 @@ internal sealed class TrayContext : ApplicationContext
         {
             return;
         }
-        var blink = _currentStyle == OverlayStyle.Streaming && Blink.PeriodMs > 0;
+        var watchedAppRunning = _currentStyle == OverlayStyle.StreamingWithWatchedApp;
+        Blink.PeriodMs = watchedAppRunning ? WatchedAppBlinkPeriodMs : _blinkPeriodSetting;
+        var blink = watchedAppRunning || (_currentStyle == OverlayStyle.Streaming && _blinkPeriodSetting > 0);
         foreach (var screen in Screen.AllScreens)
         {
-            _overlays.Add(new BorderOverlay(screen, _currentStyle, blink));
+            _overlays.AddRange(BorderOverlay.ForScreen(screen, _currentStyle, blink));
             if (_showLabelItem.Checked)
             {
-                _overlays.Add(new LabelOverlay(screen, _currentStyle, _strings.LabelFor(_currentStyle), blink));
+                _overlays.Add(new LabelOverlay(screen, _currentStyle, _strings.LabelFor(_currentStyle, _runningWatchedApps), blink));
             }
         }
         foreach (var overlay in _overlays)
@@ -273,6 +296,7 @@ internal sealed class TrayContext : ApplicationContext
         _blinkSlowItem.Text = _strings.MenuBlinkSlow;
         _blinkNormalItem.Text = _strings.MenuBlinkNormal;
         _blinkFastItem.Text = _strings.MenuBlinkFast;
+        _watchedAppsItem.Text = _strings.MenuWatchedApps;
         _startupItem.Text = _strings.MenuStartup;
         _languageItem.Text = _strings.MenuLanguage;
         _languageAutoItem.Text = _strings.MenuLanguageAuto;
@@ -328,7 +352,7 @@ internal sealed class TrayContext : ApplicationContext
 
     private void UpdateBlinkChecks(int periodMs)
     {
-        Blink.PeriodMs = periodMs;
+        _blinkPeriodSetting = periodMs;
         foreach (ToolStripMenuItem item in _blinkItem.DropDownItems)
         {
             item.Checked = (int)item.Tag! == periodMs;
@@ -345,8 +369,36 @@ internal sealed class TrayContext : ApplicationContext
         item.Checked = enabled;
     }
 
+    private static List<string> LoadWatchedApps()
+    {
+        using var key = Registry.CurrentUser.OpenSubKey(SettingsKeyPath);
+        return key?.GetValue(WatchedAppsValueName) is string[] apps ? [.. apps.Where(app => app.Length > 0)] : [];
+    }
+
+    private void ShowWatchedApps()
+    {
+        if (_watchedAppsForm is not null)
+        {
+            _watchedAppsForm.Activate();
+            return;
+        }
+        _watchedAppsForm = new WatchedAppsForm(_strings, $"{_strings.MenuWatchedApps.TrimEnd('.')} - {AppName}", _watchedApps, apps =>
+        {
+            _watchedApps = [.. apps];
+            using var key = Registry.CurrentUser.CreateSubKey(SettingsKeyPath);
+            key.SetValue(WatchedAppsValueName, apps.ToArray(), RegistryValueKind.MultiString);
+        });
+        _watchedAppsForm.FormClosed += (_, _) =>
+        {
+            _watchedAppsForm.Dispose();
+            _watchedAppsForm = null;
+        };
+        _watchedAppsForm.Show();
+    }
+
     protected override void ExitThreadCore()
     {
+        _watchedAppsForm?.Close();
         _timer.Stop();
         SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
         _currentStyle = null;

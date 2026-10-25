@@ -25,8 +25,13 @@ internal sealed partial class EncoderMonitor
     private HashSet<string> _discordExePaths = new(StringComparer.OrdinalIgnoreCase);
     private DateTime _lastProcessRefresh = DateTime.MinValue;
 
+    private HashSet<string> _runningProcessNames = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>実行中の Discord の実行ファイルのパス（最大 2 秒前の情報）。</summary>
     public IReadOnlyCollection<string> DiscordExePaths => _discordExePaths;
+
+    /// <summary>実行中の全プロセスの名前（拡張子なしの exe 名。最大 2 秒前の情報）。</summary>
+    public IReadOnlySet<string> RunningProcessNames => _runningProcessNames;
 
     private void RefreshDiscordProcessesIfStale()
     {
@@ -38,8 +43,10 @@ internal sealed partial class EncoderMonitor
 
         var pids = new HashSet<int>();
         var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var process in Process.GetProcesses())
         {
+            names.Add(process.ProcessName);
             if (DiscordProcessNames.Contains(process.ProcessName, StringComparer.OrdinalIgnoreCase))
             {
                 pids.Add(process.Id);
@@ -59,6 +66,7 @@ internal sealed partial class EncoderMonitor
         }
         _discordPids = pids;
         _discordExePaths = paths;
+        _runningProcessNames = names;
     }
 
     /// <summary>Discord 全プロセスの動画エンコード使用率の合計 (%)。</summary>

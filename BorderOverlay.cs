@@ -7,6 +7,8 @@ namespace StreamingIndicatorForDiscord;
 internal sealed class OverlayStyle(Color color, int thickness, Color labelTextColor)
 {
     public static readonly OverlayStyle Streaming = new(Color.FromArgb(230, 20, 20), 6, Color.White);
+    // 画面共有中に注意するアプリが起動しているとき。枠を太くし、必ず速く点滅させる。
+    public static readonly OverlayStyle StreamingWithWatchedApp = new(Color.FromArgb(230, 20, 20), 14, Color.White);
     public static readonly OverlayStyle InCall = new(Color.FromArgb(255, 190, 0), 3, Color.Black);
     public static readonly OverlayStyle DetectionError = new(Color.FromArgb(255, 190, 0), 3, Color.Black);
 
@@ -50,6 +52,42 @@ internal static class Blink
         {
             ChangedCore -= value;
             if (ChangedCore is null)
+            {
+                Timer.Stop();
+            }
+        }
+    }
+}
+
+// マウスカーソルの位置。枠ごとにタイマーを持たず、1 つのタイマーで動いたときだけ知らせる。
+internal static class CursorWatcher
+{
+    private static readonly System.Windows.Forms.Timer Timer = new() { Interval = 30 };
+    private static event Action? MovedCore;
+
+    static CursorWatcher() => Timer.Tick += (_, _) =>
+    {
+        var position = Cursor.Position;
+        if (position != Position)
+        {
+            Position = position;
+            MovedCore?.Invoke();
+        }
+    };
+
+    public static Point Position { get; private set; } = Cursor.Position;
+
+    public static event Action Moved
+    {
+        add
+        {
+            MovedCore += value;
+            Timer.Start();
+        }
+        remove
+        {
+            MovedCore -= value;
+            if (MovedCore is null)
             {
                 Timer.Stop();
             }
@@ -102,56 +140,243 @@ internal abstract class OverlayWindow : Form
 }
 
 /// <summary>
-/// 1 枚のモニターの外周に枠を描く。
+/// モニター外周の枠の 1 辺。マウスカーソルの周りの円の中だけ枠を薄くし、
+/// 枠の下にあるものを見えるようにする（クリックは常に透過する）。
+/// ピクセルごとの透明度で描くため、細い 1 辺ずつのウィンドウにして描き直すデータを小さく保つ。
 /// </summary>
 internal sealed class BorderOverlay : OverlayWindow
 {
-    private static readonly Color TransparentColor = Color.FromArgb(1, 2, 3);
+    // カーソルからこの距離 (96 DPI 換算の px) までは枠を消し、外側の距離にかけて元の濃さに戻す。
+    private const int FadeInnerRadius = 150;
+    private const int FadeOuterRadius = 450;
+
+    private const byte AC_SRC_OVER = 0x00;
+    private const byte AC_SRC_ALPHA = 0x01;
+    private const uint ULW_ALPHA = 0x00000002;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativePoint(int x, int y)
+    {
+        public int X = x;
+        public int Y = y;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeSize(int cx, int cy)
+    {
+        public int Cx = cx;
+        public int Cy = cy;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BlendFunction
+    {
+        public byte BlendOp;
+        public byte BlendFlags;
+        public byte SourceConstantAlpha;
+        public byte AlphaFormat;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BitmapInfoHeader
+    {
+        public int Size;
+        public int Width;
+        public int Height;
+        public short Planes;
+        public short BitCount;
+        public int Compression;
+        public int SizeImage;
+        public int XPelsPerMeter;
+        public int YPelsPerMeter;
+        public int ClrUsed;
+        public int ClrImportant;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr hdcDst, ref NativePoint pptDst, ref NativeSize psize,
+        IntPtr hdcSrc, ref NativePoint pptSrc, uint crKey, ref BlendFunction pblend, uint dwFlags);
+
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr CreateCompatibleDC(IntPtr hdc);
+
+    [DllImport("gdi32.dll")]
+    private static extern bool DeleteDC(IntPtr hdc);
+
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr CreateDIBSection(IntPtr hdc, ref BitmapInfoHeader pbmi, uint usage, out IntPtr ppvBits, IntPtr hSection, uint offset);
+
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr SelectObject(IntPtr hdc, IntPtr h);
+
+    [DllImport("gdi32.dll")]
+    private static extern bool DeleteObject(IntPtr ho);
 
     private readonly OverlayStyle _style;
     private readonly bool _blink;
+    private int[] _solidPixels = [];
+    private int[] _pixels = [];
+    private IntPtr _memDc;
+    private IntPtr _bitmap;
+    private IntPtr _oldBitmap;
+    private IntPtr _bits;
+    private int _innerRadius;
+    private int _outerRadius;
+    private bool _drawnWithFade;
 
-    public BorderOverlay(Screen screen, OverlayStyle style, bool blink)
+    private BorderOverlay(Rectangle bounds, OverlayStyle style, bool blink)
     {
         _style = style;
         _blink = blink;
-        BackColor = TransparentColor;
-        TransparencyKey = TransparentColor;
-        Bounds = screen.Bounds;
+        Bounds = bounds;
+    }
 
-        if (blink)
+    /// <summary>1 枚のモニターの外周 4 辺。</summary>
+    public static IEnumerable<BorderOverlay> ForScreen(Screen screen, OverlayStyle style, bool blink)
+    {
+        var b = screen.Bounds;
+        var t = style.Thickness;
+        yield return new(new Rectangle(b.Left, b.Top, b.Width, t), style, blink);
+        yield return new(new Rectangle(b.Left, b.Bottom - t, b.Width, t), style, blink);
+        yield return new(new Rectangle(b.Left, b.Top + t, t, b.Height - 2 * t), style, blink);
+        yield return new(new Rectangle(b.Right - t, b.Top + t, t, b.Height - 2 * t), style, blink);
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+
+        var scale = DeviceDpi / 96f;
+        _innerRadius = (int)(FadeInnerRadius * scale);
+        _outerRadius = (int)(FadeOuterRadius * scale);
+        CreateBitmap();
+        Render();
+
+        CursorWatcher.Moved += OnCursorMoved;
+        if (_blink)
         {
-            Blink.Changed += OnBlinkChanged;
+            Blink.Changed += Render;
         }
     }
 
-    // 再描画を後回しにせず、その場で描き直す。
-    private void OnBlinkChanged() => Refresh();
-
-    protected override void OnPaint(PaintEventArgs e)
+    private void CreateBitmap()
     {
-        // 消灯中は何も描かない（背景は透過色なので枠が消える）。
-        if (_blink && Blink.IsOff)
+        // 上から下へ並ぶ 32bpp の DIB。ピクセルはアルファ乗算済みの BGRA。
+        var header = new BitmapInfoHeader
+        {
+            Size = Marshal.SizeOf<BitmapInfoHeader>(),
+            Width = Width,
+            Height = -Height,
+            Planes = 1,
+            BitCount = 32,
+        };
+        _memDc = CreateCompatibleDC(IntPtr.Zero);
+        _bitmap = CreateDIBSection(_memDc, ref header, 0, out _bits, IntPtr.Zero, 0);
+        _oldBitmap = SelectObject(_memDc, _bitmap);
+
+        var c = _style.Color;
+        _solidPixels = new int[Width * Height];
+        Array.Fill(_solidPixels, Premultiply(c, 255));
+        _pixels = new int[_solidPixels.Length];
+    }
+
+    private static int Premultiply(Color c, int alpha) =>
+        alpha << 24 | c.R * alpha / 255 << 16 | c.G * alpha / 255 << 8 | c.B * alpha / 255;
+
+    // カーソルが近いときと、前回フェードを描いたとき（元に戻すため）だけ描き直す。
+    private void OnCursorMoved()
+    {
+        if (_drawnWithFade || DistanceTo(CursorWatcher.Position) < _outerRadius)
+        {
+            Render();
+        }
+    }
+
+    private double DistanceTo(Point p)
+    {
+        var dx = Math.Max(Math.Max(Left - p.X, p.X - (Right - 1)), 0);
+        var dy = Math.Max(Math.Max(Top - p.Y, p.Y - (Bottom - 1)), 0);
+        return Math.Sqrt(dx * dx + dy * dy);
+    }
+
+    private void Render()
+    {
+        if (_bits == IntPtr.Zero)
         {
             return;
         }
-        var g = e.Graphics;
-        var w = ClientSize.Width;
-        var h = ClientSize.Height;
-        var t = _style.Thickness;
 
-        using var brush = new SolidBrush(_style.Color);
-        g.FillRectangle(brush, 0, 0, w, t);
-        g.FillRectangle(brush, 0, h - t, w, t);
-        g.FillRectangle(brush, 0, 0, t, h);
-        g.FillRectangle(brush, w - t, 0, t, h);
+        var cursor = CursorWatcher.Position;
+        _drawnWithFade = DistanceTo(cursor) < _outerRadius;
+        if (_blink && Blink.IsOff)
+        {
+            Array.Clear(_pixels);
+        }
+        else
+        {
+            Array.Copy(_solidPixels, _pixels, _pixels.Length);
+            if (_drawnWithFade)
+            {
+                ApplyFade(cursor);
+            }
+        }
+        Marshal.Copy(_pixels, 0, _bits, _pixels.Length);
+
+        var destination = new NativePoint(Left, Top);
+        var size = new NativeSize(Width, Height);
+        var source = new NativePoint(0, 0);
+        var blend = new BlendFunction { BlendOp = AC_SRC_OVER, SourceConstantAlpha = 255, AlphaFormat = AC_SRC_ALPHA };
+        UpdateLayeredWindow(Handle, IntPtr.Zero, ref destination, ref size, _memDc, ref source, 0, ref blend, ULW_ALPHA);
+    }
+
+    // カーソルの周りの円の中だけ、距離に応じて透明にする。円にかかる範囲のピクセルだけ計算する。
+    private void ApplyFade(Point cursor)
+    {
+        var w = Width;
+        var x0 = Math.Max(0, cursor.X - _outerRadius - Left);
+        var x1 = Math.Min(w, cursor.X + _outerRadius - Left + 1);
+        var y0 = Math.Max(0, cursor.Y - _outerRadius - Top);
+        var y1 = Math.Min(Height, cursor.Y + _outerRadius - Top + 1);
+        for (var y = y0; y < y1; y++)
+        {
+            var dy = Top + y - cursor.Y;
+            for (var x = x0; x < x1; x++)
+            {
+                var dx = Left + x - cursor.X;
+                var distance = Math.Sqrt(dx * dx + dy * dy);
+                if (distance >= _outerRadius)
+                {
+                    continue;
+                }
+                var alpha = distance <= _innerRadius ? 0
+                    : (int)(255 * (distance - _innerRadius) / (_outerRadius - _innerRadius));
+                _pixels[y * w + x] = Premultiply(_style.Color, alpha);
+            }
+        }
+    }
+
+    protected override void OnPaintBackground(PaintEventArgs e)
+    {
+        // 表示は UpdateLayeredWindow で行うため、通常の描画はしない。
     }
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing && _blink)
+        if (disposing)
         {
-            Blink.Changed -= OnBlinkChanged;
+            CursorWatcher.Moved -= OnCursorMoved;
+            if (_blink)
+            {
+                Blink.Changed -= Render;
+            }
+        }
+        if (_memDc != IntPtr.Zero)
+        {
+            SelectObject(_memDc, _oldBitmap);
+            DeleteObject(_bitmap);
+            DeleteDC(_memDc);
+            _memDc = IntPtr.Zero;
+            _bits = IntPtr.Zero;
         }
         base.Dispose(disposing);
     }
