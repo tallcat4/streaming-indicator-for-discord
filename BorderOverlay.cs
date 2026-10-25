@@ -214,6 +214,9 @@ internal sealed class BorderOverlay : OverlayWindow
 
     private readonly OverlayStyle _style;
     private readonly bool _blink;
+    // WinForms はウィンドウを最低 16px 程度に広げてしまうため、本来の位置と大きさを別に持ち、
+    // UpdateLayeredWindow でこの大きさに合わせる。
+    private readonly Rectangle _bounds;
     private int[] _solidPixels = [];
     private int[] _pixels = [];
     private IntPtr _memDc;
@@ -228,6 +231,7 @@ internal sealed class BorderOverlay : OverlayWindow
     {
         _style = style;
         _blink = blink;
+        _bounds = bounds;
         Bounds = bounds;
     }
 
@@ -265,8 +269,8 @@ internal sealed class BorderOverlay : OverlayWindow
         var header = new BitmapInfoHeader
         {
             Size = Marshal.SizeOf<BitmapInfoHeader>(),
-            Width = Width,
-            Height = -Height,
+            Width = _bounds.Width,
+            Height = -_bounds.Height,
             Planes = 1,
             BitCount = 32,
         };
@@ -275,7 +279,7 @@ internal sealed class BorderOverlay : OverlayWindow
         _oldBitmap = SelectObject(_memDc, _bitmap);
 
         var c = _style.Color;
-        _solidPixels = new int[Width * Height];
+        _solidPixels = new int[_bounds.Width * _bounds.Height];
         Array.Fill(_solidPixels, Premultiply(c, 255));
         _pixels = new int[_solidPixels.Length];
     }
@@ -294,8 +298,8 @@ internal sealed class BorderOverlay : OverlayWindow
 
     private double DistanceTo(Point p)
     {
-        var dx = Math.Max(Math.Max(Left - p.X, p.X - (Right - 1)), 0);
-        var dy = Math.Max(Math.Max(Top - p.Y, p.Y - (Bottom - 1)), 0);
+        var dx = Math.Max(Math.Max(_bounds.Left - p.X, p.X - (_bounds.Right - 1)), 0);
+        var dy = Math.Max(Math.Max(_bounds.Top - p.Y, p.Y - (_bounds.Bottom - 1)), 0);
         return Math.Sqrt(dx * dx + dy * dy);
     }
 
@@ -322,8 +326,8 @@ internal sealed class BorderOverlay : OverlayWindow
         }
         Marshal.Copy(_pixels, 0, _bits, _pixels.Length);
 
-        var destination = new NativePoint(Left, Top);
-        var size = new NativeSize(Width, Height);
+        var destination = new NativePoint(_bounds.Left, _bounds.Top);
+        var size = new NativeSize(_bounds.Width, _bounds.Height);
         var source = new NativePoint(0, 0);
         var blend = new BlendFunction { BlendOp = AC_SRC_OVER, SourceConstantAlpha = 255, AlphaFormat = AC_SRC_ALPHA };
         UpdateLayeredWindow(Handle, IntPtr.Zero, ref destination, ref size, _memDc, ref source, 0, ref blend, ULW_ALPHA);
@@ -332,17 +336,17 @@ internal sealed class BorderOverlay : OverlayWindow
     // カーソルの周りの円の中だけ、距離に応じて透明にする。円にかかる範囲のピクセルだけ計算する。
     private void ApplyFade(Point cursor)
     {
-        var w = Width;
-        var x0 = Math.Max(0, cursor.X - _outerRadius - Left);
-        var x1 = Math.Min(w, cursor.X + _outerRadius - Left + 1);
-        var y0 = Math.Max(0, cursor.Y - _outerRadius - Top);
-        var y1 = Math.Min(Height, cursor.Y + _outerRadius - Top + 1);
+        var (left, top, w, h) = (_bounds.Left, _bounds.Top, _bounds.Width, _bounds.Height);
+        var x0 = Math.Max(0, cursor.X - _outerRadius - left);
+        var x1 = Math.Min(w, cursor.X + _outerRadius - left + 1);
+        var y0 = Math.Max(0, cursor.Y - _outerRadius - top);
+        var y1 = Math.Min(h, cursor.Y + _outerRadius - top + 1);
         for (var y = y0; y < y1; y++)
         {
-            var dy = Top + y - cursor.Y;
+            var dy = top + y - cursor.Y;
             for (var x = x0; x < x1; x++)
             {
-                var dx = Left + x - cursor.X;
+                var dx = left + x - cursor.X;
                 var distance = Math.Sqrt(dx * dx + dy * dy);
                 if (distance >= _outerRadius)
                 {
@@ -358,6 +362,57 @@ internal sealed class BorderOverlay : OverlayWindow
     protected override void OnPaintBackground(PaintEventArgs e)
     {
         // 表示は UpdateLayeredWindow で行うため、通常の描画はしない。
+    }
+
+    private const int WM_WINDOWPOSCHANGING = 0x0046;
+    private const int WM_GETMINMAXINFO = 0x0024;
+    // MINMAXINFO の ptMinTrackSize の位置（ptReserved, ptMaxSize, ptMaxPosition の後ろ）。
+    private const int MinTrackSizeOffset = 24;
+    private const int SWP_NOSIZE = 0x0001;
+    private const int SWP_NOMOVE = 0x0002;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WindowPos
+    {
+        public IntPtr Hwnd;
+        public IntPtr HwndInsertAfter;
+        public int X;
+        public int Y;
+        public int Cx;
+        public int Cy;
+        public int Flags;
+    }
+
+    protected override void WndProc(ref Message m)
+    {
+        // Windows はウィンドウを最小の大きさ（20px 前後）まで広げるため、最小を 1px にする。
+        if (m.Msg == WM_GETMINMAXINFO)
+        {
+            Marshal.WriteInt32(m.LParam, MinTrackSizeOffset, 1);
+            Marshal.WriteInt32(m.LParam, MinTrackSizeOffset + 4, 1);
+            m.Result = IntPtr.Zero;
+            return;
+        }
+        // WinForms や DPI の変更でウィンドウが広げられると枠が太く見えるため、常に本来の位置と大きさに戻す。
+        if (m.Msg == WM_WINDOWPOSCHANGING)
+        {
+            var pos = Marshal.PtrToStructure<WindowPos>(m.LParam);
+            if ((pos.Flags & SWP_NOSIZE) == 0)
+            {
+                pos.Cx = _bounds.Width;
+                pos.Cy = _bounds.Height;
+            }
+            if ((pos.Flags & SWP_NOMOVE) == 0)
+            {
+                pos.X = _bounds.X;
+                pos.Y = _bounds.Y;
+            }
+            Marshal.StructureToPtr(pos, m.LParam, false);
+            // 既定の処理は最小の大きさに広げ直すので通さない。
+            m.Result = IntPtr.Zero;
+            return;
+        }
+        base.WndProc(ref m);
     }
 
     protected override void Dispose(bool disposing)
